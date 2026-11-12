@@ -2425,7 +2425,12 @@ impl super::Instance {
             non_coherent_map_mask: phd_capabilities.properties.limits.non_coherent_atom_size - 1,
             can_present: true,
             //TODO: make configurable
-            robust_buffer_access: phd_features.core.robust_buffer_access != 0,
+            // Horizon: not on the Raspberry Pi 4's V3DV, where the driver's robust buffer access
+            // costs about a fifth of the GPU's frame (45 -> 36 ms in the world at 1280x800).
+            // Naga's own buffer bounds checks (`Restrict`, chosen below when this is off) keep
+            // every shader checked and cost nothing measurable there.
+            robust_buffer_access: phd_features.core.robust_buffer_access != 0
+                && !phd_capabilities.is_driver(vk::DriverId::MESA_V3DV),
             robust_image_access: match phd_features.robustness2 {
                 Some(ref f) => f.robust_image_access2 != 0,
                 None => phd_features
