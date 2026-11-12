@@ -45,9 +45,9 @@ pub(super) fn reducible_model_sprites(
 }
 
 /// Every sprite that may lose resolution when even the model textures' fallback leaves the
-/// atlas too big for the GPU (`HudAtlas::layout_reducing_largest`): all but the GUI's own
-/// sprites, the fonts, Horizon's sprites and blurred (bordered) ones, so text and menus stay
-/// sharp while large textures (mob skins, paintings, maps) shrink first.
+/// atlas too big for the GPU (`HudAtlas::layout_reducing_largest`): all but the fonts,
+/// Horizon's sprites and blurred (bordered) ones, so text stays sharp. GUI sprites shrink
+/// only after other textures half their size (`shrink_order`).
 pub(super) fn reducible_sprites(
     root: &Path,
     images: &[PackedImage],
@@ -60,14 +60,47 @@ pub(super) fn reducible_sprites(
         .map(|(name, ..)| name)
         .filter(|name| {
             let path = name.split_once(':').map_or(name.as_str(), |(_, path)| path);
-            !(path.starts_with("gui/")
-                || path.starts_with("font/")
+            !(path.starts_with("font/")
                 || path.starts_with("horizon/")
                 || bordered.contains(*name)
                 || fonts.contains(&atlas_sources::texture_path(root, name, "textures")))
         })
         .cloned()
         .collect()
+}
+
+/// The order `layout_reducing_largest` halves textures in, largest first: a GUI sprite counts
+/// as half its size, so menus lose detail only after the mob skins and paintings twice their
+/// size have.
+fn shrink_order((name, w, h, _): &PackedImage) -> u32 {
+    let path = name.split_once(':').map_or(name.as_str(), |(_, path)| path);
+    let side = (*w).max(*h);
+    if path.starts_with("gui/") {
+        side / 2
+    } else {
+        side
+    }
+}
+
+/// The texels each kind of texture (`entity`, `gui`, `item`...) takes, largest first: what to
+/// look at when an atlas doesn't fit.
+pub(super) fn texel_summary(images: &[PackedImage]) -> String {
+    let mut kinds: HashMap<&str, (u64, usize)> = HashMap::new();
+    for (name, w, h, _) in images {
+        let path = name.split_once(':').map_or(name.as_str(), |(_, path)| path);
+        let kind = path.split('/').next().unwrap_or(path);
+        let entry = kinds.entry(kind).or_default();
+        entry.0 += u64::from(*w) * u64::from(*h);
+        entry.1 += 1;
+    }
+    let mut kinds: Vec<_> = kinds.into_iter().collect();
+    kinds.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    kinds
+        .iter()
+        .take(8)
+        .map(|(kind, (texels, count))| format!("{kind}: {count} images, {texels} texels"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl HudAtlas {
@@ -149,13 +182,13 @@ impl HudAtlas {
             let Some(largest) = images
                 .iter()
                 .filter(|i| candidate(i))
-                .map(|(_, w, h, _)| (*w).max(*h))
+                .map(shrink_order)
                 .max()
             else {
                 return Err(error);
             };
             for image in images.iter_mut() {
-                if !candidate(image) || image.1.max(image.2) != largest {
+                if !candidate(image) || shrink_order(image) != largest {
                     continue;
                 }
                 let (name, w, h, pixels) = image;

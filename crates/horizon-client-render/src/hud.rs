@@ -12,7 +12,7 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-use model_reducing::{reducible_model_sprites, reducible_sprites};
+use model_reducing::{reducible_model_sprites, reducible_sprites, texel_summary};
 
 mod animate;
 pub mod cit_glint;
@@ -1456,13 +1456,27 @@ impl HudAtlas {
             Ok(layout)
         })
         .or_else(|error| -> Result<_> {
+            log::warn!("HUD textures by kind: {}", texel_summary(&images));
             let reducible = reducible_sprites(root, &images, &bordered);
             let layout =
                 Self::layout_reducing_largest(&mut images, &mut gui_sizes, &reducible, max)?;
             log::warn!(
                 "reduced the largest HUD textures to fit this GPU's {max}x{max} limit: {error}"
             );
+            log::warn!(
+                "HUD textures by kind after reducing: {}",
+                texel_summary(&images)
+            );
             Ok(layout)
+        })
+        .or_else(|error| -> Result<_> {
+            // Still too big: pack for the largest atlas and let the renderer upload it shrunk
+            // whole (`gfx.rs`, `atlas_shrink`), blurrier but running.
+            if max >= MAX_ATLAS_SIZE {
+                return Err(error);
+            }
+            log::warn!("the HUD textures don't fit {max}x{max} even reduced: {error}");
+            Self::layout(&images, MAX_ATLAS_SIZE)
         })?;
         // A multiple of 1024 rather than a power of two: the default resources
         // need 4096x5120 (8192 rows before), Faithful 32x 4096x12288 (16384).
