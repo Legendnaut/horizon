@@ -12,7 +12,7 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-use model_reducing::reducible_model_sprites;
+use model_reducing::{reducible_model_sprites, reducible_sprites};
 
 mod animate;
 pub mod cit_glint;
@@ -1442,21 +1442,28 @@ impl HudAtlas {
             images.push(("horizon/recipes/settings".to_owned(), width, height, rgba));
         }
         images.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
-        let (width, placements, glyph_region) =
-            Self::layout_leaving_out(&mut images, &mut animated, &cit_names, MAX_ATLAS_SIZE)
-                .or_else(|error| -> Result<_> {
-                    let models = reducible_model_sprites(root, &images, &bordered);
-                    let layout = Self::layout_reducing_models(
-                        &mut images,
-                        &mut gui_sizes,
-                        &models,
-                        MAX_ATLAS_SIZE,
-                    )?;
-                    log::warn!(
-                        "reduced HUD model texture resolution to keep the resource pack: {error}"
-                    );
-                    Ok(layout)
-                })?;
+        let max = atlas_limit();
+        let (width, placements, glyph_region) = Self::layout_leaving_out(
+            &mut images,
+            &mut animated,
+            &cit_names,
+            max,
+        )
+        .or_else(|error| -> Result<_> {
+            let models = reducible_model_sprites(root, &images, &bordered);
+            let layout = Self::layout_reducing_models(&mut images, &mut gui_sizes, &models, max)?;
+            log::warn!("reduced HUD model texture resolution to keep the resource pack: {error}");
+            Ok(layout)
+        })
+        .or_else(|error| -> Result<_> {
+            let reducible = reducible_sprites(root, &images, &bordered);
+            let layout =
+                Self::layout_reducing_largest(&mut images, &mut gui_sizes, &reducible, max)?;
+            log::warn!(
+                "reduced the largest HUD textures to fit this GPU's {max}x{max} limit: {error}"
+            );
+            Ok(layout)
+        })?;
         // A multiple of 1024 rather than a power of two: the default resources
         // need 4096x5120 (8192 rows before), Faithful 32x 4096x12288 (16384).
         let height = (glyph_region + GLYPH_ROWS).next_multiple_of(1024);
@@ -2535,6 +2542,38 @@ impl HudUniform {
         }
     }
 }
+/// The largest shared atlas this machine's GPU holds: `HORIZON_ATLAS_MAX` when set, else the
+/// largest 2D texture of its hardware adapters (the Raspberry Pi 4's V3D allows 4096), never
+/// past `MAX_ATLAS_SIZE`. Asked once, before the atlas is packed, which happens before the
+/// renderer opens its device.
+pub fn atlas_limit() -> u32 {
+    static LIMIT: OnceLock<u32> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        if let Some(max) = std::env::var("HORIZON_ATLAS_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+        {
+            return max.clamp(1024, MAX_ATLAS_SIZE);
+        }
+        if cfg!(test) {
+            return MAX_ATLAS_SIZE;
+        }
+        gpu_texture_limit().map_or(MAX_ATLAS_SIZE, |limit| limit.min(MAX_ATLAS_SIZE))
+    })
+}
+fn gpu_texture_limit() -> Option<u32> {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends =
+        (wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12).with_env();
+    let backends = descriptor.backends;
+    let instance = wgpu::Instance::new(descriptor);
+    let adapters = pollster::block_on(instance.enumerate_adapters(backends));
+    adapters
+        .iter()
+        .filter(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
+        .map(|a| a.limits().max_texture_dimension_2d)
+        .max()
+}
 /// The smallest power of two that brings a `width`x`height` atlas within `limit` texels a
 /// side, or `None` past 1/16 (the atlas would be unreadable).
 pub fn atlas_shrink(width: u32, height: u32, limit: u32) -> Option<u32> {
@@ -3186,6 +3225,32 @@ mod coverage_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn largest_textures_shrink_first_to_fit_a_small_gpu() {
+        // Two 1024-wide textures and a 16-texel GUI sprite don't fit 1024 a side with the
+        // glyph rows: the big ones halve (keeping their GUI size), the GUI sprite stays.
+        let image = |name: &str, side: u32| {
+            (
+                name.to_owned(),
+                side,
+                side,
+                vec![255; (side * side * 4) as usize],
+            )
+        };
+        let mut images = vec![
+            image("entity/big", 1024),
+            image("painting/big", 1024),
+            image("gui/small", 16),
+        ];
+        let reducible = HashSet::from(["entity/big".to_owned(), "painting/big".to_owned()]);
+        let mut gui_sizes = HashMap::new();
+        HudAtlas::layout_reducing_largest(&mut images, &mut gui_sizes, &reducible, 1024).unwrap();
+        let side = |name: &str| images.iter().find(|i| i.0 == name).map(|i| (i.1, i.2));
+        assert_eq!(side("entity/big"), Some((256, 256)));
+        assert_eq!(side("gui/small"), Some((16, 16)));
+        assert_eq!(gui_sizes.get("entity/big"), Some(&(1024, 1024)));
+    }
+
     #[test]
     fn atlas_shrinks_to_fit_a_small_gpu() {
         // The default resources' 4096x6144 atlas on the Raspberry Pi 4 (4096 a side).
