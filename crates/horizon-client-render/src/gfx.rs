@@ -85,6 +85,13 @@ fn lean_terrain(source: &str) -> String {
             "for (var i = 0u; i < min(globals.colored_count.x, 16u); i++) {",
             "for (var i = 0u; i < 0u; i++) {",
         ),
+        // The vertex side of the emissive overlays and coloured lights: the lookup loop over
+        // up to 128 pairs kept the vertex shader at 52 registers and 2 threads on V3D.
+        (
+            "for (var i = 0u; i < min(globals.emissive_count.x, 128u); i++) {",
+            "for (var i = 0u; i < 0u; i++) {",
+        ),
+        ("if globals.colored_count.x > 0u {", "if false {"),
     ] {
         debug_assert!(out.contains(from), "terrain.wgsl no longer has `{from}`");
         out = out.replace(from, to);

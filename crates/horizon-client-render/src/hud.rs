@@ -133,6 +133,19 @@ pub const MAX_ATLAS_SIZE: u32 = 16384;
 /// framed maps, so the pool holds a wall; too few slots re-upload every map
 /// every frame. 26.3's `MapTextureManager` keeps a texture per map instead.
 pub const MAP_SLOTS: usize = 256;
+/// The map slots this GPU's atlas holds: 64 under an 8192 limit (the Raspberry Pi 4's 4096),
+/// where the full pool's 4 million texels would push mob skins out of their pixels.
+pub fn map_slots() -> usize {
+    if atlas_limit() < 8192 { 64 } else { MAP_SLOTS }
+}
+/// `PACK_ICON_SLOTS`, but 24 under an 8192 atlas limit, as `map_slots`.
+pub fn pack_icon_slots() -> usize {
+    if atlas_limit() < 8192 {
+        24
+    } else {
+        PACK_ICON_SLOTS
+    }
+}
 /// The atlas sprite of map slot `slot` (`horizon/map{slot}`), named once:
 /// every map shown asks for its slot's each frame.
 pub fn map_slot_sprite(slot: usize) -> Option<&'static str> {
@@ -909,7 +922,7 @@ impl HudAtlas {
     /// in the destination atlas, so keep the source buffers empty and avoid
     /// duplicating the atlas-sized allocation during packing.
     fn slots(images: &mut Vec<PackedImage>, trim: (u32, u32), mod_image: bool) {
-        for i in 0..MAP_SLOTS {
+        for i in 0..map_slots() {
             let name = map_slot_sprite(i).unwrap_or_default();
             images.push((name.into(), 128, 128, Vec::new()));
         }
@@ -939,7 +952,7 @@ impl HudAtlas {
         for i in 0..WORLD_ICON_SLOTS {
             images.push((format!("horizon/world-icon{i}"), 64, 64, Vec::new()));
         }
-        for i in 0..PACK_ICON_SLOTS {
+        for i in 0..pack_icon_slots() {
             images.push((
                 format!("horizon/pack-icon{i}"),
                 PACK_ICON_SIZE,
@@ -3263,6 +3276,28 @@ mod tests {
         assert_eq!(side("entity/big"), Some((256, 256)));
         assert_eq!(side("gui/small"), Some((16, 16)));
         assert_eq!(gui_sizes.get("entity/big"), Some(&(1024, 1024)));
+    }
+
+    #[test]
+    fn mob_skins_keep_their_texels_while_bigger_gui_shrinks() {
+        // A 64-texel pig skin and a 128-texel GUI panel over a 1024 atlas that the panels
+        // overfill: the panels halve, the skin (whose eyes are single texels) stays whole.
+        let image = |name: &str, side: u32| {
+            (
+                name.to_owned(),
+                side,
+                side,
+                vec![255; (side * side * 4) as usize],
+            )
+        };
+        let mut images = vec![image("entity/pig", 64)];
+        images.extend((0..70).map(|i| image(&format!("gui/panel{i}"), 128)));
+        let reducible: HashSet<String> = images.iter().map(|i| i.0.clone()).collect();
+        let mut gui_sizes = HashMap::new();
+        HudAtlas::layout_reducing_largest(&mut images, &mut gui_sizes, &reducible, 1024).unwrap();
+        let side = |name: &str| images.iter().find(|i| i.0 == name).map(|i| i.1);
+        assert_eq!(side("entity/pig"), Some(64));
+        assert_eq!(side("gui/panel0"), Some(64));
     }
 
     #[test]
