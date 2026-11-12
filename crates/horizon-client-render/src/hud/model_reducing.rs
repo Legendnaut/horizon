@@ -44,6 +44,32 @@ pub(super) fn reducible_model_sprites(
     models
 }
 
+/// Every sprite that may lose resolution when even the model textures' fallback leaves the
+/// atlas too big for the GPU (`HudAtlas::layout_reducing_largest`): all but the GUI's own
+/// sprites, the fonts, Horizon's sprites and blurred (bordered) ones, so text and menus stay
+/// sharp while large textures (mob skins, paintings, maps) shrink first.
+pub(super) fn reducible_sprites(
+    root: &Path,
+    images: &[PackedImage],
+    bordered: &HashSet<String>,
+) -> HashSet<String> {
+    use crate::atlas_sources;
+    let fonts: HashSet<_> = bitmap_font_textures(root).into_iter().collect();
+    images
+        .iter()
+        .map(|(name, ..)| name)
+        .filter(|name| {
+            let path = name.split_once(':').map_or(name.as_str(), |(_, path)| path);
+            !(path.starts_with("gui/")
+                || path.starts_with("font/")
+                || path.starts_with("horizon/")
+                || bordered.contains(*name)
+                || fonts.contains(&atlas_sources::texture_path(root, name, "textures")))
+        })
+        .cloned()
+        .collect()
+}
+
 impl HudAtlas {
     /// `layout`, but when `extras` (Custom Item Textures) make the images more than `max`
     /// holds, without them: they are left out, not the packs.
@@ -98,6 +124,45 @@ impl HudAtlas {
             }
             if !changed {
                 return Err(error);
+            }
+            images.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
+        }
+    }
+    /// For a GPU whose textures are smaller than the atlas (the Raspberry Pi 4's V3D allows
+    /// 4096 a side): halve the largest `reducible` textures, then the next largest, until the
+    /// atlas fits `max`, keeping their logical GUI sizes. Never below 16 texels, never
+    /// run-time slots (empty pixels).
+    pub(super) fn layout_reducing_largest(
+        images: &mut [PackedImage],
+        gui_sizes: &mut HashMap<String, (u32, u32)>,
+        reducible: &HashSet<String>,
+        max: u32,
+    ) -> Result<(u32, Vec<(u32, u32)>, u32)> {
+        loop {
+            let error = match Self::layout(images, max) {
+                Ok(layout) => return Ok(layout),
+                Err(error) => error,
+            };
+            let candidate = |(name, w, h, pixels): &PackedImage| {
+                reducible.contains(name) && !pixels.is_empty() && (*w).max(*h) > 16
+            };
+            let Some(largest) = images
+                .iter()
+                .filter(|i| candidate(i))
+                .map(|(_, w, h, _)| (*w).max(*h))
+                .max()
+            else {
+                return Err(error);
+            };
+            for image in images.iter_mut() {
+                if !candidate(image) || image.1.max(image.2) != largest {
+                    continue;
+                }
+                let (name, w, h, pixels) = image;
+                let (nw, nh) = ((*w / 2).max(1), (*h / 2).max(1));
+                *pixels = super::shrink_rgba(pixels, *w, *h, 2);
+                gui_sizes.entry(name.clone()).or_insert((*w, *h));
+                (*w, *h) = (nw, nh);
             }
             images.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
         }
