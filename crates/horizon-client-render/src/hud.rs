@@ -2675,6 +2675,10 @@ use crate::gfx::hud_coverage::{self, Pipeline};
 pub struct HudRenderer {
     pictures: HashMap<u64, (Arc<pictures::Picture>, wgpu::BindGroup)>,
     pub sprite_animations: Vec<(Rect, crate::sprites::SpriteAnimation, (usize, usize, u32))>,
+    /// The animations' frames on the GPU, once made (`animate::Gpu`); `None` copies them from the CPU.
+    animation_gpu: Option<animate::Gpu>,
+    /// Whether `animation_gpu` was made for the current `sprite_animations`.
+    animation_gpu_tried: bool,
     /// The shared atlas texture, for run-time glyph uploads.
     pub atlas_texture: Option<wgpu::Texture>,
     /// How many atlas texels share one texel of `atlas_texture` on a side: 1, or 2, 4... on a
@@ -2969,6 +2973,8 @@ impl HudRenderer {
             atlas_texture: None,
             atlas_shrink: 1,
             sprite_animations: Vec::new(),
+            animation_gpu: None,
+            animation_gpu_tried: false,
             pipeline,
             invert_pipeline,
             additive_pipeline,

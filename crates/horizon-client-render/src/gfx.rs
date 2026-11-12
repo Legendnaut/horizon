@@ -3566,10 +3566,17 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                // COPY_SRC: a shader pack's weather copies the rain and snow sprites out.
+                // COPY_SRC: a shader pack's weather copies the rain and snow sprites out;
+                // STORAGE_BINDING: its animated sprites are written by a compute pass
+                // (`hud/animate.rs`) where the device has them.
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::COPY_SRC
+                    | if animate::SpriteAnimator::compute(&adapter, &device) {
+                        wgpu::TextureUsages::STORAGE_BINDING
+                    } else {
+                        wgpu::TextureUsages::empty()
+                    },
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
@@ -8119,6 +8126,7 @@ impl Renderer {
         }
         if self.animated_textures {
             self.hud.animate(
+                &self.device,
                 &mut self.uploads,
                 &mut encoder,
                 frame.ticks,
