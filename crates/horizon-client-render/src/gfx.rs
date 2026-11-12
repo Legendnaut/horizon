@@ -44,7 +44,52 @@ fn light_marks(format: wgpu::TextureFormat, hdr: bool) -> bool {
 }
 
 fn terrain_shader() -> String {
-    include_str!("hdr_light.wgsl").to_owned() + include_str!("terrain.wgsl")
+    let source = include_str!("hdr_light.wgsl").to_owned() + include_str!("terrain.wgsl");
+    if LEAN_TERRAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        lean_terrain(&source)
+    } else {
+        source
+    }
+}
+
+/// Whether the terrain shader leaves out the paths a small GPU can't afford to carry
+/// (`lean_terrain`): set when the renderer opens its device, before the shader is built.
+static LEAN_TERRAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `HORIZON_LEAN_TERRAIN=1` or `0`, else on for the Raspberry Pi 4's V3D. Every path a
+/// branch on a uniform could take is compiled into the terrain shaders, and on V3D their
+/// registers cut the threads a core runs them on from 4 to 2, so the texture waits of every
+/// pixel go unhidden: about 1100 instructions a pixel where vanilla's look needs a fraction.
+fn lean_terrain_wanted(info: &wgpu::AdapterInfo) -> bool {
+    match std::env::var("HORIZON_LEAN_TERRAIN").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => info.name.contains("V3D"),
+    }
+}
+
+/// The terrain shader without the paths of features a lean build gives up: RGSS texture
+/// filtering (nearest sampling stays, vanilla's default), OptiFine emissive overlays, and
+/// Horizon Extras' dynamic and coloured lights. Each is a branch replaced by its "off" side,
+/// so the rest of the picture is the same.
+fn lean_terrain(source: &str) -> String {
+    let mut out = source.to_owned();
+    for (from, to) in [
+        ("if u32(globals.filtering.x) == 1u {", "if false {"),
+        ("if in.emissive_layer != 0xffffffffu {", "if false {"),
+        (
+            "let count = min(u32(globals.time.z), 16u);",
+            "let count = 0u;",
+        ),
+        (
+            "for (var i = 0u; i < min(globals.colored_count.x, 16u); i++) {",
+            "for (var i = 0u; i < 0u; i++) {",
+        ),
+    ] {
+        debug_assert!(out.contains(from), "terrain.wgsl no longer has `{from}`");
+        out = out.replace(from, to);
+    }
+    out
 }
 
 fn border_shader() -> String {
@@ -124,7 +169,11 @@ fn outline_vertices_into(edges: &[[f64; 6]], camera: glam::DVec3, out: &mut Vec<
 /// the sections it removes. Keep the pass available for explicit A/B checks,
 /// while leaving hardware adapters on the existing default.
 fn occlusion_culling_requested(info: &wgpu::AdapterInfo, env: Option<&str>) -> bool {
-    env != Some("0") && (env.is_some() || info.device_type != wgpu::DeviceType::Cpu)
+    // The Raspberry Pi 4's V3D too: its tiles store and reload the whole frame around the
+    // test, which cost it more than the sections it hid (measured: 65 ms a frame to 61).
+    env != Some("0")
+        && (env.is_some()
+            || info.device_type != wgpu::DeviceType::Cpu && !info.name.contains("V3D"))
 }
 
 /// `DrawableGizmoPrimitives.getGroup`: a line whose ARGB alpha is 255 joins the
@@ -2620,6 +2669,14 @@ impl Renderer {
         // shader pack atlas all cut the sprites by it.
         let split = check_layers(&adapter, layers)?;
         let info = adapter.get_info();
+        let lean = lean_terrain_wanted(&info);
+        if lean != LEAN_TERRAIN.swap(lean, std::sync::atomic::Ordering::Relaxed) && lean {
+            log::warn!(
+                "Horizon renderer: lean terrain shaders for {} (no RGSS filtering, OptiFine \
+                 emissive overlays or dynamic lights; HORIZON_LEAN_TERRAIN=0 keeps them)",
+                info.name
+            );
+        }
         surface_setup::log_sprite_split(&info, split, layers);
         crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
         let size = window.inner_size();
@@ -13774,6 +13831,23 @@ mod tests {
             assert_eq!(super::array_layers(count, true), gl);
             assert_eq!(super::array_layers(count, false), count);
         }
+    }
+    #[test]
+    fn lean_terrain_shader_drops_the_given_up_paths_and_validates() {
+        let full = super::terrain_shader();
+        let lean = super::lean_terrain(&full);
+        // Each given-up path is replaced by its off side, nothing else changes.
+        assert!(!lean.contains("u32(globals.filtering.x) == 1u"));
+        assert!(!lean.contains("in.emissive_layer != 0xffffffffu"));
+        assert!(!lean.contains("min(u32(globals.time.z), 16u)"));
+        assert_eq!(lean.lines().count(), full.lines().count());
+        let module = naga::front::wgsl::parse_str(&lean).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
     }
     #[test]
     fn plain_solid_shaders_translate_for_every_backend() {
