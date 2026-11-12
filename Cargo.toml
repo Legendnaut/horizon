@@ -79,6 +79,8 @@ large_enum_variant = "allow"
 # And gfx-rs/wgpu#10714: on Windows, Vulkan waits for the acquire fence only in
 # FIFO (VSync), where it was meant to pace frames; with VSync off it made every
 # frame wait for the GPU to finish the one before (#4604).
+# And on the Raspberry Pi 4's V3DV, no robust buffer access: naga's bounds checks keep
+# shaders' buffer reads checked at a fraction of the driver's cost (~45 -> ~36 ms GPU).
 # Drop this and the folder once a wgpu release has these fixes.
 [patch.crates-io]
 wgpu-hal = { path = "third_party/wgpu-hal" }
