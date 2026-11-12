@@ -3494,12 +3494,30 @@ impl Renderer {
         });
         let (atlas_pixels, atlas_width, atlas_height) = hud_atlas;
         let limit = device.limits().max_texture_dimension_2d;
-        if atlas_width.max(atlas_height) > limit {
-            return Err(format!(
+        // A GPU whose 2D textures are smaller than the atlas (the Raspberry Pi 4's V3D allows
+        // 4096) gets it at a half, quarter... of its size: sprite rects are fractions of the
+        // atlas, so only the detail is lost; run-time patches are shrunk the same way
+        // (`HudRenderer::upload_patches`).
+        let shrink = crate::hud::atlas_shrink(atlas_width, atlas_height, limit).ok_or_else(|| {
+            format!(
                 "the shared atlas is {atlas_width}x{atlas_height}; this GPU allows {limit}x{limit}"
             )
-            .into());
-        }
+        })?;
+        let shrunk;
+        let (atlas_pixels, atlas_width, atlas_height) = if shrink > 1 {
+            log::warn!(
+                "the shared atlas is {atlas_width}x{atlas_height} and this GPU allows \
+                 {limit}x{limit}: uploading it at 1/{shrink} size"
+            );
+            shrunk = crate::hud::shrink_rgba(atlas_pixels, atlas_width, atlas_height, shrink);
+            (
+                shrunk.as_slice(),
+                atlas_width.div_ceil(shrink),
+                atlas_height.div_ceil(shrink),
+            )
+        } else {
+            (atlas_pixels, atlas_width, atlas_height)
+        };
         let atlas = device.create_texture_with_data(
             &queue,
             &wgpu::TextureDescriptor {
@@ -3588,6 +3606,7 @@ impl Renderer {
             hud_coverage,
         )?;
         hud.atlas_texture = Some(atlas.clone());
+        hud.atlas_shrink = shrink;
         let entity_step = crate::spans::startup::step("renderer.entity_pipelines");
         let entity_shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon entities"),
