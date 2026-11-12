@@ -84,11 +84,7 @@ pub(super) fn build_renderer(
     // adopted. Configure the world swapchain before its first gameplay frame instead of
     // waiting for `Game::apply_settings` after the handoff.
     renderer.set_present_mode(vsync, settings.present_mode);
-    renderer.hud.sprite_animations = atlas
-        .sprite_animations
-        .iter()
-        .map(|(rect, animation)| (*rect, animation.clone(), (usize::MAX, 0, 0)))
-        .collect();
+    renderer.hud.set_sprite_animations(&atlas.sprite_animations);
     renderer
         .hud
         .set_text_shader(&renderer.device, atlas.text_shaders.gui.as_deref());
@@ -162,11 +158,7 @@ pub(super) fn loading_renderer(
         previous.map(|r| r.display_reading()).unwrap_or_default(),
     ))?;
     if let Some(atlas) = atlas {
-        renderer.hud.sprite_animations = atlas
-            .sprite_animations
-            .iter()
-            .map(|(rect, animation)| (*rect, animation.clone(), (usize::MAX, 0, 0)))
-            .collect();
+        renderer.hud.set_sprite_animations(&atlas.sprite_animations);
     }
     Ok(renderer)
 }
