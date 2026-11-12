@@ -2535,6 +2535,75 @@ impl HudUniform {
         }
     }
 }
+/// The smallest power of two that brings a `width`x`height` atlas within `limit` texels a
+/// side, or `None` past 1/16 (the atlas would be unreadable).
+pub fn atlas_shrink(width: u32, height: u32, limit: u32) -> Option<u32> {
+    let mut shrink = 1;
+    while width.div_ceil(shrink).max(height.div_ceil(shrink)) > limit {
+        shrink *= 2;
+        if shrink > 16 {
+            return None;
+        }
+    }
+    Some(shrink)
+}
+/// `rgba` (`width`x`height`) at 1/`shrink` size: each texel the average of the `shrink`x`shrink`
+/// block it covers, its colour weighted by alpha so cut-out edges don't darken.
+pub fn shrink_rgba(rgba: &[u8], width: u32, height: u32, shrink: u32) -> Vec<u8> {
+    let (w, h) = (width.div_ceil(shrink), height.div_ceil(shrink));
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let (mut sum, mut alpha, mut n) = ([0u32; 3], 0u32, 0u32);
+            for sy in y * shrink..((y + 1) * shrink).min(height) {
+                for sx in x * shrink..((x + 1) * shrink).min(width) {
+                    let i = ((sy * width + sx) * 4) as usize;
+                    let a = u32::from(rgba[i + 3]);
+                    for c in 0..3 {
+                        sum[c] += u32::from(rgba[i + c]) * a;
+                    }
+                    alpha += a;
+                    n += 1;
+                }
+            }
+            let o = ((y * w + x) * 4) as usize;
+            if alpha > 0 {
+                for c in 0..3 {
+                    out[o + c] = ((sum[c] + alpha / 2) / alpha) as u8;
+                }
+            }
+            out[o + 3] = ((alpha + n / 2) / n.max(1)) as u8;
+        }
+    }
+    out
+}
+/// A patch in atlas texels, moved and shrunk onto a texture `shrink` times smaller: it covers
+/// every texture texel the patch touches, sampling the patch's nearest texel for each.
+fn shrink_patch(p: &crate::font::Patch, shrink: u32) -> crate::font::Patch {
+    let (x0, y0) = (p.x / shrink, p.y / shrink);
+    let x1 = (p.x + p.width).div_ceil(shrink);
+    let y1 = (p.y + p.height).div_ceil(shrink);
+    let (width, height) = (x1 - x0, y1 - y0);
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    if p.width > 0 && p.height > 0 {
+        for y in 0..height {
+            let sy = ((y0 + y) * shrink + shrink / 2).clamp(p.y, p.y + p.height - 1) - p.y;
+            for x in 0..width {
+                let sx = ((x0 + x) * shrink + shrink / 2).clamp(p.x, p.x + p.width - 1) - p.x;
+                let i = ((sy * p.width + sx) * 4) as usize;
+                let o = ((y * width + x) * 4) as usize;
+                rgba[o..o + 4].copy_from_slice(&p.rgba[i..i + 4]);
+            }
+        }
+    }
+    crate::font::Patch {
+        x: x0,
+        y: y0,
+        width,
+        height,
+        rgba,
+    }
+}
 use crate::gfx::hud_coverage::{self, Pipeline};
 
 pub struct HudRenderer {
@@ -2542,6 +2611,9 @@ pub struct HudRenderer {
     pub sprite_animations: Vec<(Rect, crate::sprites::SpriteAnimation, (usize, usize, u32))>,
     /// The shared atlas texture, for run-time glyph uploads.
     pub atlas_texture: Option<wgpu::Texture>,
+    /// How many atlas texels share one texel of `atlas_texture` on a side: 1, or 2, 4... on a
+    /// GPU whose texture limit is smaller than the atlas (`atlas_shrink`).
+    pub atlas_shrink: u32,
     pipeline: Pipeline,
     /// `RenderPipelines.CROSSHAIR`.
     invert_pipeline: Pipeline,
@@ -2829,6 +2901,7 @@ impl HudRenderer {
         Ok(Self {
             pictures: HashMap::new(),
             atlas_texture: None,
+            atlas_shrink: 1,
             sprite_animations: Vec::new(),
             pipeline,
             invert_pipeline,
@@ -2880,8 +2953,18 @@ impl HudRenderer {
         patches: &[crate::font::Patch],
     ) {
         if let Some(texture) = &self.atlas_texture {
+            let shrink = self.atlas_shrink.max(1);
+            let shrunk: Vec<crate::font::Patch>;
+            let patches = if shrink > 1 {
+                shrunk = patches.iter().map(|p| shrink_patch(p, shrink)).collect();
+                &shrunk[..]
+            } else {
+                patches
+            };
             for p in patches {
-                if p.x.saturating_add(p.width) <= texture.width()
+                if p.width > 0
+                    && p.height > 0
+                    && p.x.saturating_add(p.width) <= texture.width()
                     && p.y.saturating_add(p.height) <= texture.height()
                 {
                     uploads.texture(
@@ -3103,6 +3186,29 @@ mod coverage_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn atlas_shrinks_to_fit_a_small_gpu() {
+        // The default resources' 4096x6144 atlas on the Raspberry Pi 4 (4096 a side).
+        assert_eq!(atlas_shrink(4096, 6144, 4096), Some(2));
+        assert_eq!(atlas_shrink(4096, 6144, 16384), Some(1));
+        // A 2x2 block of one opaque red and three clear texels averages to red at a quarter alpha.
+        let rgba = [255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(shrink_rgba(&rgba, 2, 2, 2), vec![255, 0, 0, 64]);
+        // A glyph patch at (3, 5), 4x2, lands on texels (1, 2) to (3, 3) of a half-size texture.
+        let patch = crate::font::Patch {
+            x: 3,
+            y: 5,
+            width: 4,
+            height: 2,
+            rgba: vec![9; 32],
+        };
+        let shrunk = shrink_patch(&patch, 2);
+        assert_eq!(
+            (shrunk.x, shrunk.y, shrunk.width, shrunk.height),
+            (1, 2, 3, 2)
+        );
+        assert!(shrunk.rgba.iter().all(|&b| b == 9));
+    }
     use super::*;
 
     #[test]
