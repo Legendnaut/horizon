@@ -7,7 +7,7 @@
 use super::{Game, lan::LanHost};
 use horizon_client::{
     blocks::{Fluid, MAP_COLORS},
-    hud::{HudBatch, MAP_SLOTS, Rect, map_slot_sprite},
+    hud::{HudBatch, Rect, map_slot_sprite, map_slots},
     items::ItemStack,
     mesher::Vertex,
 };
@@ -731,7 +731,7 @@ impl Default for Maps {
         Self {
             data: HashMap::new(),
             last_id: None,
-            slots: super::atlas_slots::AtlasSlots::new(MAP_SLOTS),
+            slots: super::atlas_slots::AtlasSlots::new(map_slots()),
             missing: Default::default(),
         }
     }

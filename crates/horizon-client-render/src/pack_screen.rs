@@ -5,9 +5,11 @@
 //! entries, scroll, selection and focus as the vanilla widgets do, and
 //! [`PackScreen::draw`] gives the screen's GUI calls. The game shows it;
 //! tools/test_pack_screen_parity.py compares it with vanilla.
+#[cfg(test)]
+use crate::hud::PACK_ICON_SLOTS;
 use crate::{
     font::Patch,
-    hud::{HudAtlas, PACK_ICON_SIZE, PACK_ICON_SLOTS},
+    hud::{HudAtlas, PACK_ICON_SIZE},
     packs::{Position, Selectable, SelectionModel},
     screen_draw::{self as d, Backdrop, Draw, Measure, TextField},
     text::{Style, Text},
@@ -418,7 +420,9 @@ impl IconSlots {
             self.held.push(kept);
             return Some((slot, !same));
         }
-        let slot = match (0..PACK_ICON_SLOTS).find(|i| !self.held.iter().any(|h| h.1 == *i)) {
+        let slot = match (0..crate::hud::pack_icon_slots())
+            .find(|i| !self.held.iter().any(|h| h.1 == *i))
+        {
             Some(free) => free,
             None if self.held.first().is_some_and(|h| h.3 < self.frame) => self.held.remove(0).1,
             None => return None,

@@ -71,11 +71,15 @@ pub(super) fn reducible_sprites(
 
 /// The order `layout_reducing_largest` halves textures in, largest first: a GUI sprite counts
 /// as half its size, so menus lose detail only after the mob skins and paintings twice their
-/// size have.
+/// size have, and a texture of 64 texels or less as a quarter.
 fn shrink_order((name, w, h, _): &PackedImage) -> u32 {
     let path = name.split_once(':').map_or(name.as_str(), |(_, path)| path);
     let side = (*w).max(*h);
-    if path.starts_with("gui/") {
+    // A 64-texel mob skin draws a pig's eye with one texel: halved, the eye blurs away. They
+    // go last, after the GUI.
+    if side <= 64 {
+        side / 4
+    } else if path.starts_with("gui/") {
         side / 2
     } else {
         side
