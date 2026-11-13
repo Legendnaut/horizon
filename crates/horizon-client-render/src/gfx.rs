@@ -92,6 +92,14 @@ fn lean_terrain(source: &str) -> String {
             "for (var i = 0u; i < 0u; i++) {",
         ),
         ("if globals.colored_count.x > 0u {", "if false {"),
+        // V3D has no gradient sampling: Mesa turns each into a size query, two square roots
+        // and a logarithm before an explicit-level sample. The same level from one logarithm,
+        // the arrays' width in `filtering.y`, saves ~2 ms of a frame on the Raspberry Pi 4.
+        (
+            "        return textureSampleGrad(sprites, sprite_sampler, uv, l, dx, dy);\n    }",
+            "        return textureSampleLevel(sprites, sprite_sampler, uv, l, 0.5 * log2(max(dot(dx, dx), \
+             dot(dy, dy)) * globals.filtering.y * globals.filtering.y));\n    }",
+        ),
     ] {
         debug_assert!(out.contains(from), "terrain.wgsl no longer has `{from}`");
         out = out.replace(from, to);
