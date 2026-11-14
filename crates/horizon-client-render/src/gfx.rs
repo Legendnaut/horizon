@@ -110,11 +110,17 @@ fn lean_terrain(source: &str) -> String {
 }
 
 /// Whether the terrain shader goes one step past `lean_terrain` (`minimal_terrain`): set
-/// with `LEAN_TERRAIN`, from `HORIZON_MINIMAL_TERRAIN=1`; off unless asked for.
+/// with `LEAN_TERRAIN`, and only with it.
 static MINIMAL_TERRAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn minimal_terrain_wanted() -> bool {
-    std::env::var("HORIZON_MINIMAL_TERRAIN").as_deref() == Ok("1")
+/// `HORIZON_MINIMAL_TERRAIN=1` or `0`, else on for the Raspberry Pi 4's V3D, where it took a
+/// frame's GPU time from 36.5 ms to 27 (1280x800, 4 chunks).
+fn minimal_terrain_wanted(info: &wgpu::AdapterInfo) -> bool {
+    match std::env::var("HORIZON_MINIMAL_TERRAIN").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => info.name.contains("V3D"),
+    }
 }
 
 /// The lean terrain shader cut to what vanilla's look needs, for the Raspberry Pi 4's V3D:
@@ -2728,12 +2734,13 @@ impl Renderer {
         // shader pack atlas all cut the sprites by it.
         let split = check_layers(&adapter, layers)?;
         let info = adapter.get_info();
-        let minimal = lean_terrain_wanted(&info) && minimal_terrain_wanted();
+        let minimal = lean_terrain_wanted(&info) && minimal_terrain_wanted(&info);
         if minimal != MINIMAL_TERRAIN.swap(minimal, std::sync::atomic::Ordering::Relaxed) && minimal
         {
             log::warn!(
-                "Horizon renderer: minimal terrain shaders (HORIZON_MINIMAL_TERRAIN=1): one texel \
-                 at mip level 0, fog per vertex, no dithered fades"
+                "Horizon renderer: minimal terrain shaders for {} (one texel at mip level 0, fog \
+                 per vertex, no dithered fades; HORIZON_MINIMAL_TERRAIN=0 keeps the lean ones)",
+                info.name
             );
         }
         let lean = lean_terrain_wanted(&info);
