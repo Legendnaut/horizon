@@ -118,11 +118,12 @@ fn minimal_terrain_wanted() -> bool {
 }
 
 /// The lean terrain shader cut to what vanilla's look needs, for the Raspberry Pi 4's V3D:
-/// one fetch of a sprite's texel at mip level 0 (snapped to the texel's centre, so the linear
-/// sampler reads it whole), times the vertex colour (light, shade and tint), the fade-in, and
-/// fog worked out per vertex. Given up on top of `lean_terrain`'s: sampleNearest's blend where
-/// two texels meet, mipmaps, the dithered fade of distant tiles and leaving sections, and HDR
-/// output's marks in the terrain's alpha.
+/// one fetch of a sprite at mip level 0, times the vertex colour (light, shade and tint), the
+/// fade-in, and fog worked out per vertex. The fetch is sampleNearest's with the texel's screen
+/// size from `fwidth`, not gradient sampling: without its blend where texels meet, distant
+/// textures sparkled as the camera moved. Given up on top of `lean_terrain`'s: mipmaps, the
+/// dithered fade of distant tiles and leaving sections, and HDR output's marks in the terrain's
+/// alpha.
 fn minimal_terrain(lean: &str) -> String {
     let mut out = lean.to_owned();
     for (from, to) in [
@@ -130,7 +131,11 @@ fn minimal_terrain(lean: &str) -> String {
             "fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {",
             "fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {\n    \
              let size = globals.filtering.y;\n    \
-             return sprite_level((floor(tile_uv(tiled) * size) + 0.5) / size, layer, 0.0);\n}\n\
+             let texels = tile_uv(tiled) * size;\n    \
+             let center = round(texels) - 0.5;\n    \
+             let per_pixel = max(fwidth(tiled) * size, vec2(1e-6));\n    \
+             let offset = clamp((texels - center - 0.5) / per_pixel + 0.5, vec2(0.0), vec2(1.0));\n    \
+             return sprite_level((center + offset) / size, layer, 0.0);\n}\n\
              fn sprite_full(tiled: vec2<f32>, layer: u32) -> vec4<f32> {",
         ),
         // The fog, from the vertex's distances, in the wire's spare fourth component.
