@@ -45,7 +45,9 @@ fn light_marks(format: wgpu::TextureFormat, hdr: bool) -> bool {
 
 fn terrain_shader() -> String {
     let source = include_str!("hdr_light.wgsl").to_owned() + include_str!("terrain.wgsl");
-    if LEAN_TERRAIN.load(std::sync::atomic::Ordering::Relaxed) {
+    if MINIMAL_TERRAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        minimal_terrain(&lean_terrain(&source))
+    } else if LEAN_TERRAIN.load(std::sync::atomic::Ordering::Relaxed) {
         lean_terrain(&source)
     } else {
         source
@@ -105,6 +107,72 @@ fn lean_terrain(source: &str) -> String {
         out = out.replace(from, to);
     }
     out
+}
+
+/// Whether the terrain shader goes one step past `lean_terrain` (`minimal_terrain`): set
+/// with `LEAN_TERRAIN`, from `HORIZON_MINIMAL_TERRAIN=1`; off unless asked for.
+static MINIMAL_TERRAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn minimal_terrain_wanted() -> bool {
+    std::env::var("HORIZON_MINIMAL_TERRAIN").as_deref() == Ok("1")
+}
+
+/// The lean terrain shader cut to what vanilla's look needs, for the Raspberry Pi 4's V3D:
+/// one fetch of a sprite's texel at mip level 0 (snapped to the texel's centre, so the linear
+/// sampler reads it whole), times the vertex colour (light, shade and tint), the fade-in, and
+/// fog worked out per vertex. Given up on top of `lean_terrain`'s: sampleNearest's blend where
+/// two texels meet, mipmaps, the dithered fade of distant tiles and leaving sections, and HDR
+/// output's marks in the terrain's alpha.
+fn minimal_terrain(lean: &str) -> String {
+    let mut out = lean.to_owned();
+    for (from, to) in [
+        (
+            "fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {",
+            "fn sprite(tiled: vec2<f32>, layer: u32) -> vec4<f32> {\n    \
+             let size = globals.filtering.y;\n    \
+             return sprite_level((floor(tile_uv(tiled) * size) + 0.5) / size, layer, 0.0);\n}\n\
+             fn sprite_full(tiled: vec2<f32>, layer: u32) -> vec4<f32> {",
+        ),
+        // The fog, from the vertex's distances, in the wire's spare fourth component.
+        (
+            "w.d = vec4(o.spherical, o.cylindrical, o.height, 0.0);",
+            "w.d = vec4(o.spherical, o.cylindrical, o.height, max(linear_fog(o.spherical, \
+             globals.fog.x, globals.fog.y), linear_fog(o.cylindrical, globals.fog.z, \
+             globals.fog.w)) * globals.fog_color.a);",
+        ),
+        (
+            "o.height = w.d.z;",
+            "o.height = w.d.z;\n    minimal_fog = w.d.w;",
+        ),
+        (
+            "fn solid_color(in: TerrainOut) -> vec4<f32> {",
+            "fn solid_color(in: TerrainOut) -> vec4<f32> {\n    return minimal_solid(in, true);\n}\n\
+             fn solid_color_full(in: TerrainOut) -> vec4<f32> {",
+        ),
+        (
+            "    let texel = sprite(in.uv, in.layer & 0x7fffu);\n    var color = texel * in.color;\n    \
+             color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);\n    \
+             return solid_finish(in, texel, color);",
+            "    return minimal_solid(in, false);",
+        ),
+    ] {
+        debug_assert!(
+            out.matches(from).count() == 1,
+            "terrain.wgsl no longer has one `{from}`"
+        );
+        out = out.replace(from, to);
+    }
+    out + "
+var<private> minimal_fog: f32;
+// `solid_color` and `fs_opaque` cut down (`minimal_terrain` in gfx.rs).
+fn minimal_solid(in: TerrainOut, cutout: bool) -> vec4<f32> {
+    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    var color = texel * in.color;
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    if cutout && color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
+    return solid_light(vec4(mix(color.rgb, globals.fog_color.rgb, minimal_fog), 1.0));
+}
+"
 }
 
 fn border_shader() -> String {
@@ -2655,6 +2723,14 @@ impl Renderer {
         // shader pack atlas all cut the sprites by it.
         let split = check_layers(&adapter, layers)?;
         let info = adapter.get_info();
+        let minimal = lean_terrain_wanted(&info) && minimal_terrain_wanted();
+        if minimal != MINIMAL_TERRAIN.swap(minimal, std::sync::atomic::Ordering::Relaxed) && minimal
+        {
+            log::warn!(
+                "Horizon renderer: minimal terrain shaders (HORIZON_MINIMAL_TERRAIN=1): one texel \
+                 at mip level 0, fog per vertex, no dithered fades"
+            );
+        }
         let lean = lean_terrain_wanted(&info);
         if lean != LEAN_TERRAIN.swap(lean, std::sync::atomic::Ordering::Relaxed) && lean {
             log::warn!(
@@ -13683,6 +13759,19 @@ mod tests {
         assert!(!lean.contains("min(u32(globals.time.z), 16u)"));
         assert_eq!(lean.lines().count(), full.lines().count());
         let module = naga::front::wgsl::parse_str(&lean).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+    #[test]
+    fn minimal_terrain_shader_validates() {
+        let full = super::terrain_shader();
+        let minimal = super::minimal_terrain(&super::lean_terrain(&full));
+        assert!(minimal.contains("return minimal_solid(in, false);"));
+        let module = naga::front::wgsl::parse_str(&minimal).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
